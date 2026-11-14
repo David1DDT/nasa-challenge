@@ -1,69 +1,132 @@
-import Image from "next/image";
+'use client';
+
+import React, { useState, useEffect, useCallback } from 'react';
+import StellariumView, { Star } from '@/components/StellariumView';
+import StellariumHeader from '@/components/StellariumHeader';
+import StellariumFooter from '@/components/StellariumFooter';
+import StarInfoCard from '@/components/StarInfoCard';
+import TimeEvolutionSlider from '@/components/TimeEvolutionSlider';
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
 
 export default function Home() {
+  const [stars, setStars] = useState<Star[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // View toggles (Geocentric Pure Space POV)
+  const [showGrid, setShowGrid] = useState(false);
+  const [showStarLabels, setShowStarLabels] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Selection & settings
+  const [selectedStar, setSelectedStar] = useState<Star | null>(null);
+  const [targetStarName, setTargetStarName] = useState<string | null>(null);
+  const [catalog, setCatalog] = useState<'notebook' | 'satellite'>('notebook');
+  const [coordMode, setCoordMode] = useState<'sphere' | 'space_3d'>('sphere');
+  const [maxMagnitude, setMaxMagnitude] = useState(16.0);
+  const [currentDay, setCurrentDay] = useState<number>(0); // 0 to 410 days (Apr 2025 - Jun 2026)
+
+  // Fetch data from Flask backend with fallback to static local public data
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    try {
+      let starsData: Star[] = [];
+      try {
+        const res = await fetch(
+          `${API_BASE_URL}/api/stars?catalog=${catalog}&mode=${coordMode}&limit=4000`,
+          { signal: AbortSignal.timeout(3000) }
+        );
+        if (res.ok) {
+          const json = await res.json();
+          starsData = json.stars || [];
+        }
+      } catch (err) {
+        console.warn('Backend server not reachable on localhost:5001, loading from local static backup...', err);
+        const backupFile =
+          catalog === 'satellite'
+            ? '/data/satellite_stars_360.json'
+            : '/data/notebook_stars.json';
+        const res = await fetch(backupFile);
+        const json = await res.json();
+        starsData = json.stars || [];
+      }
+
+      setStars(starsData);
+    } catch (e) {
+      console.error('Error loading stellar data:', e);
+    } finally {
+      setLoading(false);
+    }
+  }, [catalog, coordMode]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  // Fullscreen toggle handler
+  const handleToggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+      setIsFullscreen(true);
+    } else {
+      document.exitFullscreen().catch(() => {});
+      setIsFullscreen(false);
+    }
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <div className="relative w-screen h-screen overflow-hidden bg-[#070913] text-white font-sans select-none">
+      {/* 3D Geocentric Space View */}
+      <StellariumView
+        stars={stars}
+        showGrid={showGrid}
+        showStarLabels={showStarLabels}
+        selectedStar={selectedStar}
+        onSelectStar={(s) => setSelectedStar(s)}
+        targetStarName={targetStarName}
+        currentDay={currentDay}
+      />
+
+      {/* Top Header: Search & Corner Fullscreen Button */}
+      <StellariumHeader
+        stars={stars}
+        onSelectStar={(star) => {
+          setSelectedStar(star);
+          setTargetStarName(star.proper_name || star.name);
+        }}
+        isFullscreen={isFullscreen}
+        onToggleFullscreen={handleToggleFullscreen}
+      />
+
+      {/* Horizontal Time Evolution Slider in Corner */}
+      <TimeEvolutionSlider
+        currentDay={currentDay}
+        onChangeDay={setCurrentDay}
+        className="absolute bottom-4 left-4 z-30"
+      />
+
+      {/* Bottom Footer: Clock */}
+      <StellariumFooter
+        locationName="Geocentric Space POV"
+      />
+
+      {/* Star Details Card (When a star is clicked) */}
+      <StarInfoCard
+        star={selectedStar}
+        onClose={() => setSelectedStar(null)}
+        isNightMode={false}
+        currentDay={currentDay}
+      />
+
+      {/* Loading Overlay */}
+      {loading && (
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#070913]/80 backdrop-blur-md transition-opacity">
+          <div className="w-10 h-10 border-2 border-sky-400 border-t-transparent rounded-full animate-spin mb-3" />
+          <p className="text-sm font-medium tracking-wide text-sky-200">
+            Loading satellite 360° star data...
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+      )}
     </div>
   );
 }
