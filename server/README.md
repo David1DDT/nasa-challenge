@@ -1,6 +1,18 @@
-# SPHEREx Stellarium 3D Backend API
+# SPHEREx All-Sky Stellarium 3D Backend API
 
-Flask REST API providing 3D star data, coordinates, photometry, and infrared spectral information from NASA SPHEREx observations for 3D Stellarium / Three.js visualizers.
+Flask REST API delivering **complete all-sky** 3D star coordinates, photometry, constellations, and NASA SPHEREx infrared spectral survey data for 3D Stellarium / Three.js visualizers.
+
+---
+
+## 🌌 Complete Sky Coverage (360° x 180°)
+
+The backend covers the **entire celestial sphere**:
+- **5,044 All-Sky Stars**: Complete Hipparcos / Yale Bright Star catalog covering down to visual magnitude 6.0 across both Northern and Southern hemispheres ($\delta \in [-90^\circ, +90^\circ]$, $\alpha \in [0^\circ, 360^\circ]$).
+- **All 88 Constellations**: 3D line segments for all 88 modern IAU constellations (Orion, Ursa Major, Cassiopeia, Crux, Scorpius, etc.).
+- **Celestial Reference Sphere**: 3D grid lines for the Celestial Equator, Parallels, Meridians, and the Ecliptic plane.
+- **Deep SPHEREx Field**: 3,500 high-resolution infrared sources from SPHEREx Level-2 images (`DR1`).
+- **3D Coordinate Systems**: Both Three.js ($Y$-up) and Astronomical Cartesian coordinates.
+- **True Physical Colors & Temperatures**: Derived from standard astronomical $B-V$ color indices and infrared wavelengths.
 
 ---
 
@@ -11,79 +23,46 @@ Flask REST API providing 3D star data, coordinates, photometry, and infrared spe
 cd server
 pip install -r requirements.txt
 ```
-*(or using uv: `uv run python server.py`)*
 
 ### 2. Start the server
 ```bash
 python server.py
 ```
-By default, the server runs on **`http://localhost:5001`** (with CORS enabled for all origins, including `http://localhost:3000`).
+*(Runs on `http://localhost:5001` with CORS enabled).*
 
 ---
 
 ## 📡 API Endpoints
 
-### 1. Default Inputs & Config
-- **`GET /api/defaults`** (or `/api/config`)
-  Returns default inputs, canonical field coordinates ($\text{RA} = 304.693^\circ, \text{Dec} = 42.444^\circ$), 3D camera settings, and SPHEREx infrared spectral bands (Bands 1 to 6).
-
-### 2. 3D Stars List
+### 1. All-Sky Stars
 - **`GET /api/stars`**
-  Returns stars formatted for 3D rendering.
   - **Query Parameters**:
-    - `limit`: Number of stars to return (default: `1000`, max: `10000`)
-    - `min_flux`: Minimum flux filter ($\text{MJy/sr}$)
-    - `max_mag`: Maximum instrumental magnitude filter
+    - `limit`: Number of stars to return (e.g. `1500`, default: `1500`, `0` for all 5,044)
+    - `max_mag`: Magnitude threshold (e.g. `max_mag=3.0` for bright stars, `max_mag=6.0` for full naked-eye sky)
+    - `constellation`: Filter by constellation (e.g. `constellation=Ori`, `constellation=UMa`, `constellation=Cyg`)
+    - `hemisphere`: `north` or `south`
+    - `ra`, `dec`, `radius`: Cone search in degrees around any celestial point
+    - `catalog`: `all_sky` (default) or `deep_spherex`
     - `sphere_radius`: Radius of the 3D celestial sphere (default: `1000.0`)
-    - `min_ra`, `max_ra`, `min_dec`, `max_dec`: Bounding box filters
-  - **3D Star Object structure**:
-    ```json
-    {
-      "id": "SPX-00001",
-      "name": "SPHEREx Source 1",
-      "ra": 305.548727,
-      "dec": 40.248873,
-      "position": {
-        "x": -620.993,
-        "y": 646.109,
-        "z": 443.747
-      },
-      "position_astronomical": {
-        "x": 443.747,
-        "y": -620.993,
-        "z": 646.109
-      },
-      "magnitude": 8.72,
-      "flux_mjy_sr": 5146.148,
-      "size": 12.0,
-      "color": "#FFE6B0",
-      "spectral": {
-        "wavelength_um": 0.9882,
-        "bandwidth_um": 0.026,
-        "detector": 1,
-        "obs_id": "2025W18_1B_0074_2"
-      }
-    }
-    ```
 
-### 3. Full 3D Stellarium Scene
-- **`GET /api/scene?limit=1500&sphere_radius=1000`**
-  Returns a ready-to-render 3D scene payload:
-  - `camera`: Default camera position, target, and FOV
-  - `celestial_sphere`: Coordinate grid lines (equator, parallels, meridians) with 3D points
-  - `stars`: Array of 3D star objects
+### 2. All 88 Constellations
+- **`GET /api/constellations`**
+  Returns 3D line segments (`segments_3d`) and center coordinates for all 88 constellations.
+- **`GET /api/constellations/<id>`**
+  Returns line geometry and member stars for a specific constellation (e.g. `/api/constellations/Ori`).
 
-### 4. Single Star Details
-- **`GET /api/stars/<star_id>`** (e.g. `/api/stars/SPX-00001`)
-  Returns full metadata for the star and its 5 nearest neighboring stars.
+### 3. Complete 3D Stellarium Scene
+- **`GET /api/scene?limit=2500`**
+  Returns a ready-to-render 3D scene containing all-sky stars, 88 constellation lines, celestial equator/meridian grid, and camera configuration.
 
-### 5. Coordinate Converter
-- **`POST /api/convert/coordinates`**
-  Converts any $(\text{RA}, \text{Dec})$ in degrees to 3D Cartesian coordinates $(x, y, z)$.
-  ```json
-  { "ra": 304.6935, "dec": 42.4436, "radius": 1000 }
-  ```
+### 4. Specific Star Query
+- **`GET /api/stars/<star_id>`**
+  Search by common name (`Sirius`, `Vega`, `Betelgeuse`, `Polaris`), Hipparcos ID (`HIP-32349`), or SPHEREx ID (`SPX-00001`).
 
-### 6. Live NASA/IPAC IRSA Query
+### 5. Default Inputs & System Configuration
+- **`GET /api/defaults`** (or `/api/config`)
+  Returns all-sky boundaries, default camera setup, and SPHEREx 6 infrared spectral bands.
+
+### 6. Live NASA/IPAC IRSA SIA Query
 - **`GET /api/spherex/query?ra=304.6935&dec=42.4436&radius_arcsec=1.0`**
-  Performs a live SIA query to NASA/IPAC IRSA for matching SPHEREx observations.
+  Live query to NASA/IPAC IRSA for SPHEREx images at any sky position.
