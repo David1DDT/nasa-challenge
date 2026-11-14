@@ -19,11 +19,11 @@ export default function TimeEvolutionSlider({
   const animFrameRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
 
-  // Base observation start date: April 29, 2025
+  // Base observation start date: April 29, 2025 (Mission Day 1)
   const baseDate = new Date(Date.UTC(2025, 3, 29, 0, 24, 27));
 
-  // Compute current date from currentDay
-  const currentDate = new Date(baseDate.getTime() + currentDay * 86400000);
+  // Compute current date from currentDay (Day 1 = baseDate)
+  const currentDate = new Date(baseDate.getTime() + Math.max(0, currentDay - 1) * 86400000);
   const formattedDate = currentDate.toLocaleDateString('ro-RO', {
     day: 'numeric',
     month: 'short',
@@ -73,7 +73,7 @@ export default function TimeEvolutionSlider({
 
   const handleReset = () => {
     setIsPlaying(false);
-    onChangeDay(0);
+    onChangeDay(1);
   };
 
   const toggleSpeed = () => {
@@ -116,7 +116,7 @@ export default function TimeEvolutionSlider({
       <div className="relative py-1">
         <input
           type="range"
-          min={0}
+          min={1}
           max={410}
           step={0.5}
           value={currentDay}
@@ -128,10 +128,10 @@ export default function TimeEvolutionSlider({
 
         {/* Timeline Survey Labels */}
         <div className="flex justify-between text-[9px] font-mono text-white/40 mt-1 px-0.5">
-          <span>Apr 2025 (S1)</span>
-          <span>Sep 2025 (S2)</span>
-          <span>Feb 2026 (S3)</span>
-          <span>Iun 2026 (S4)</span>
+          <span>Z1 (Apr 2025)</span>
+          <span>Z120 (Sep 2025)</span>
+          <span>Z250 (Feb 2026)</span>
+          <span>Z410 (Iun 2026)</span>
         </div>
       </div>
 

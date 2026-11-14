@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Search, X, Maximize, Minimize } from 'lucide-react';
+import { Search, X, Maximize, Minimize, TrendingUp } from 'lucide-react';
 import { Star } from './StellariumView';
 
 interface StellariumHeaderProps {
@@ -9,6 +9,8 @@ interface StellariumHeaderProps {
   onSelectStar: (star: Star) => void;
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
+  isLightCurveOpen?: boolean;
+  onToggleLightCurve?: () => void;
 }
 
 export default function StellariumHeader({
@@ -16,6 +18,8 @@ export default function StellariumHeader({
   onSelectStar,
   isFullscreen,
   onToggleFullscreen,
+  isLightCurveOpen,
+  onToggleLightCurve,
 }: StellariumHeaderProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [isOpen, setIsOpen] = useState(false);
@@ -110,15 +114,32 @@ export default function StellariumHeader({
         )}
       </div>
 
-      {/* Right: The Only Button - Fullscreen in the Corner */}
-      <button
-        onClick={onToggleFullscreen}
-        title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-        aria-label="Fullscreen"
-        className="pointer-events-auto flex items-center justify-center w-10 h-10 rounded-full transition-all duration-200 backdrop-blur-md shadow-lg bg-black/50 hover:bg-black/75 text-white/90 hover:text-white border border-white/15 hover:scale-105 active:scale-95"
-      >
-        {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
-      </button>
+      {/* Right: Telemetry & Fullscreen buttons */}
+      <div className="flex items-center gap-2 pointer-events-auto">
+        {onToggleLightCurve && (
+          <button
+            onClick={onToggleLightCurve}
+            title="Deschide / Închide Panoul de Date & Grafice SPHEREx"
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-full text-xs font-semibold backdrop-blur-md transition-all border shadow-lg cursor-pointer ${
+              isLightCurveOpen
+                ? 'bg-sky-500/30 border-sky-400 text-sky-200'
+                : 'bg-black/50 hover:bg-black/75 border-white/20 text-white/80 hover:text-white'
+            }`}
+          >
+            <TrendingUp className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden sm:inline">Date & Grafice</span>
+          </button>
+        )}
+
+        <button
+          onClick={onToggleFullscreen}
+          title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+          aria-label="Fullscreen"
+          className="flex items-center justify-center w-10 h-10 rounded-full transition-all duration-200 backdrop-blur-md shadow-lg bg-black/50 hover:bg-black/75 text-white/90 hover:text-white border border-white/15 hover:scale-105 active:scale-95"
+        >
+          {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
+        </button>
+      </div>
     </header>
   );
 }

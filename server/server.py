@@ -29,6 +29,7 @@ DB_PATH = os.path.join(DATA_DIR, "satellite_3d_360.db")
 SATELLITE_STARS_PATH = os.path.join(DATA_DIR, "satellite_stars_360.json")
 NOTEBOOK_STARS_PATH = os.path.join(DATA_DIR, "notebook_stars.json")
 CONSTELLATIONS_PATH = os.path.join(DATA_DIR, "constellations_3d.json")
+OBSERVATIONS_PATH = os.path.join(DATA_DIR, "spherex_tutorial_443_observations.json")
 
 # In-memory caches
 CACHED_SATELLITE_STARS = None
@@ -36,6 +37,7 @@ CACHED_NOTEBOOK_META = None
 CACHED_NOTEBOOK_MTIME = 0
 CACHED_NOTEBOOK_STARS = None
 CACHED_CONSTELLATIONS = None
+CACHED_OBSERVATIONS = None
 
 
 def get_db_connection():
@@ -136,6 +138,22 @@ def load_constellations():
     return CACHED_CONSTELLATIONS
 
 
+def load_spherex_observations():
+    global CACHED_OBSERVATIONS
+    if CACHED_OBSERVATIONS is not None:
+        return CACHED_OBSERVATIONS
+    if os.path.exists(OBSERVATIONS_PATH):
+        try:
+            with open(OBSERVATIONS_PATH, "r", encoding="utf-8") as f:
+                CACHED_OBSERVATIONS = json.load(f)
+        except Exception as e:
+            logger.error("Error reading %s: %s", OBSERVATIONS_PATH, e)
+            CACHED_OBSERVATIONS = {"observations": []}
+    else:
+        CACHED_OBSERVATIONS = {"observations": []}
+    return CACHED_OBSERVATIONS
+
+
 def generate_celestial_grid(radius=1000.0):
     grid_lines = []
     # Parallels
@@ -199,6 +217,7 @@ def index():
             "GET /api/scene": "Full 360° 3D Stellarium scene payload (stars + 88 constellations + grid)",
             "GET /api/constellations": "All 88 constellations with 3D lines",
             "GET /api/notebook": "Live data and parameters from file.ipynb",
+            "GET /api/spherex/observations": "All 443 real SPHEREx DR1 and QR3 observations from caltech-ipac tutorial",
             "GET /api/defaults": "Default configuration, 360° parameters, and camera setup",
             "GET /api/health": "Health and loaded dataset counts"
         }
@@ -485,6 +504,28 @@ def get_notebook():
         "notebook_metadata": nb_meta,
         "exported_stars_count": len(nb_stars.get("stars", [])),
         "source": "file.ipynb"
+    })
+
+
+@app.route("/api/spherex/observations", methods=["GET"])
+def get_spherex_observations():
+    data = load_spherex_observations()
+    obs = data.get("observations", [])
+    detector = request.args.get("detector", "").strip().upper()
+    collection = request.args.get("collection", "").strip().lower()
+
+    filtered = obs
+    if detector:
+        filtered = [o for o in filtered if detector in o.get("detector", "").upper()]
+    if collection:
+        filtered = [o for o in filtered if collection in o.get("collection", "").lower()]
+
+    return jsonify({
+        "source": "https://caltech-ipac.github.io/irsa-tutorials/spherex-intro/",
+        "target_coordinates": data.get("target_coordinates"),
+        "total_available": len(obs),
+        "count": len(filtered),
+        "observations": filtered
     })
 
 

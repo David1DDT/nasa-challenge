@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useEffect, useRef, useMemo, useCallback, useState } from 'react';
 import * as THREE from 'three';
+import { SPHEREX_BANDS, estimateStarFluxAtWavelength, getStarVariability } from '@/lib/spherex_bands';
 
 export interface Star {
   id: string;
@@ -25,6 +26,10 @@ export interface Star {
   size?: number;
   position: { x: number; y: number; z: number };
   space_position_ly?: { x: number; y: number; z: number };
+  flux_mjy_sr?: number;
+  pmra_mas_yr?: number;
+  pmdec_mas_yr?: number;
+  radial_velocity_kms?: number;
   satellite_photometry?: {
     band1_blue_flux_mjy_sr?: number;
     band2_cyan_flux_mjy_sr?: number;
@@ -44,14 +49,63 @@ interface StellariumViewProps {
   onSelectStar: (star: Star | null) => void;
   targetStarName?: string | null;
   currentDay?: number;
+  isMonochromatic?: boolean;
+  selectedBandIndex?: number;
+  zoomTargetFov?: number | null;
+  onResetZoom?: () => void;
+  showMotionTrail?: boolean;
+}
+
+// Predict continuous astrometric position between dataset observation epochs
+export function computePredictedAstrometricCoords(
+  star: Star,
+  day: number,
+  boostFactor: number = 1.0,
+  radius: number = 980.0
+): { x: number; y: number; z: number; raDeg: number; decDeg: number } {
+  const pmra = star.pmra_mas_yr || 0;
+  const pmdec = star.pmdec_mas_yr || 0;
+  const cosDec = Math.max(0.08, Math.cos((star.dec * Math.PI) / 180));
+  // Mission counting starts strictly from Day 1 (elapsed days = day - 1)
+  const elapsedDays = Math.max(0, day - 1);
+  const tYears = elapsedDays / 365.25;
+
+  // 1. Uniform proper motion linear drift (mas)
+  const pmDriftRaMas = pmra * cosDec * tYears * boostFactor;
+  const pmDriftDecMas = pmdec * tYears * boostFactor;
+
+  // 2. Continuous Keplerian parallax reflex orbit relative to initial Day 1
+  const distLy = star.distance_ly || 1800;
+  const parallaxMas = Math.max(0.5, Math.min(60.0, 3261.56 / distLy)) * boostFactor;
+  const baseRaRad = (star.ra * Math.PI) / 180.0;
+  const baseDecRad = (star.dec * Math.PI) / 180.0;
+  const theta = (2 * Math.PI * elapsedDays) / 365.25;
+  const plxRaMas = parallaxMas * (Math.sin(theta - baseRaRad) - Math.sin(-baseRaRad));
+  const plxDecMas = parallaxMas * Math.sin(baseDecRad) * (Math.cos(theta - baseRaRad) - Math.cos(-baseRaRad));
+
+  const totalDeltaRaMas = pmDriftRaMas + plxRaMas;
+  const totalDeltaDecMas = pmDriftDecMas + plxDecMas;
+
+  const deltaRaDeg = totalDeltaRaMas / (3600000.0 * cosDec);
+  const deltaDecDeg = totalDeltaDecMas / 3600000.0;
+  const curRaDeg = star.ra + deltaRaDeg;
+  const curDecDeg = Math.max(-89.9, Math.min(89.9, star.dec + deltaDecDeg));
+
+  const curRaRad = (curRaDeg * Math.PI) / 180.0;
+  const curDecRad = (curDecDeg * Math.PI) / 180.0;
+
+  const px = radius * Math.cos(curDecRad) * Math.sin(curRaRad);
+  const py = radius * Math.sin(curDecRad);
+  const pz = radius * Math.cos(curDecRad) * Math.cos(curRaRad);
+
+  return { x: px, y: py, z: pz, raDeg: curRaDeg, decDeg: curDecDeg };
 }
 
 interface StarCloudTier {
   points: THREE.Points;
+  basePositions: Float32Array;
   baseColors: Float32Array;
-  periods: Float32Array;
-  amplitudes: Float32Array;
-  phases: Float32Array;
+  stars: Star[];
 }
 
 export default function StellariumView({
@@ -61,7 +115,12 @@ export default function StellariumView({
   selectedStar,
   onSelectStar,
   targetStarName,
-  currentDay = 0,
+  currentDay = 1,
+  isMonochromatic = false,
+  selectedBandIndex = 1,
+  zoomTargetFov = null,
+  onResetZoom,
+  showMotionTrail = false,
 }: StellariumViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const labelsCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -74,6 +133,10 @@ export default function StellariumView({
   const starsGroupRef = useRef<THREE.Group | null>(null);
   const gridGroupRef = useRef<THREE.Group | null>(null);
   const reticleRef = useRef<THREE.Group | null>(null);
+  const j2000Ref = useRef<THREE.Group | null>(null);
+  const trailGroupRef = useRef<THREE.Group | null>(null);
+  const trailGeoRef = useRef<THREE.BufferGeometry | null>(null);
+  const fieldTrailGeoRef = useRef<THREE.BufferGeometry | null>(null);
 
   // Star texture cache
   const starTextureRef = useRef<THREE.Texture | null>(null);
@@ -85,15 +148,7 @@ export default function StellariumView({
   const targetCameraRot = useRef({ azimuth: 5.3023, altitude: 0.7026 });
   const fovRef = useRef(3.2);
   const targetFovRef = useRef(3.2);
-
-  // Keep latest props in refs for animation loop
-  const propsRef = useRef({
-    stars,
-    showStarLabels,
-  });
-  useEffect(() => {
-    propsRef.current = { stars, showStarLabels };
-  }, [stars, showStarLabels]);
+  const [hudFov, setHudFov] = useState<number>(3.2);
 
   // Filter top brightest SPHEREx stars for clean, non-overlapping labels
   const prominentStars = useMemo(() => {
@@ -102,6 +157,32 @@ export default function StellariumView({
       .sort((a, b) => a.magnitude - b.magnitude)
       .slice(0, 6);
   }, [stars]);
+
+  // Top stars with highest proper motion to display field-wide trajectory trails
+  const highPmStars = useMemo(() => {
+    if (!stars || stars.length === 0) return [];
+    return [...stars]
+      .filter((s) => s.pmra_mas_yr || s.pmdec_mas_yr)
+      .sort((a, b) => {
+        const pma = Math.hypot(a.pmra_mas_yr || 0, a.pmdec_mas_yr || 0);
+        const pmb = Math.hypot(b.pmra_mas_yr || 0, b.pmdec_mas_yr || 0);
+        return pmb - pma;
+      })
+      .slice(0, 80);
+  }, [stars]);
+
+  // Keep latest props in refs for animation loop
+  const propsRef = useRef({
+    stars,
+    showStarLabels,
+    currentDay,
+    showMotionTrail,
+    selectedStar,
+    highPmStars,
+  });
+  useEffect(() => {
+    propsRef.current = { stars, showStarLabels, currentDay, showMotionTrail, selectedStar, highPmStars };
+  }, [stars, showStarLabels, currentDay, showMotionTrail, selectedStar, highPmStars]);
 
   // Star glow texture generator
   const getStarTexture = useCallback(() => {
@@ -192,16 +273,15 @@ export default function StellariumView({
         baseColors[i * 3] = r;
         baseColors[i * 3 + 1] = g;
         baseColors[i * 3 + 2] = b;
-
-        const seed = Math.abs(s.ra * 31.415 + s.dec * 17.291) % 1000;
-        periods[i] = 25.0 + (seed % 95.0);
-        amplitudes[i] = 0.08 + (seed % 28.0) * 0.01;
-        phases[i] = (seed * 0.37) % (Math.PI * 2);
       }
 
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
       geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+      const scales = new Float32Array(count);
+      scales.fill(1.0);
+      geo.setAttribute('aScale', new THREE.BufferAttribute(scales, 1));
 
       const mat = new THREE.PointsMaterial({
         size: pointSize,
@@ -214,15 +294,22 @@ export default function StellariumView({
         sizeAttenuation: false,
       });
 
+      mat.onBeforeCompile = (shader) => {
+        shader.vertexShader = 'attribute float aScale;\n' + shader.vertexShader;
+        shader.vertexShader = shader.vertexShader.replace(
+          'gl_PointSize = size;',
+          'gl_PointSize = clamp(size * (aScale > 0.0 ? aScale : 1.0), 1.0, 32.0);'
+        );
+      };
+
       const pts = new THREE.Points(geo, mat);
       pts.renderOrder = 2;
 
       tiersRef.current.push({
         points: pts,
+        basePositions: new Float32Array(positions),
         baseColors,
-        periods,
-        amplitudes,
-        phases,
+        stars: starList,
       });
 
       return pts;
@@ -239,31 +326,100 @@ export default function StellariumView({
     if (p4) group.add(p4);
   }, [stars, getStarTexture]);
 
-  // Real-time time evolution modulation of stellar brightness and infrared flux
+  // Real-time modulation: 102 Spectral Bands Monochromatic vs Full Spectrum + Proper Motion Astrometry
   useEffect(() => {
     if (tiersRef.current.length === 0) return;
+
+    const currentBand =
+      SPHEREX_BANDS[Math.max(0, Math.min(101, selectedBandIndex - 1))];
+    const monoColor = currentBand ? currentBand.colorRgb : [0.22, 0.74, 0.97];
+    const elapsedDays = Math.max(0, currentDay - 1);
+    const tYears = elapsedDays / 365.25;
+
     for (const tier of tiersRef.current) {
       const colorsAttr = tier.points.geometry.attributes.color as THREE.BufferAttribute;
-      if (!colorsAttr) continue;
+      const positionsAttr = tier.points.geometry.attributes.position as THREE.BufferAttribute;
+      const scalesAttr = tier.points.geometry.attributes.aScale as THREE.BufferAttribute | undefined;
+      if (!colorsAttr || !positionsAttr) continue;
       const arr = colorsAttr.array as Float32Array;
-      const count = tier.periods.length;
+      const posArr = positionsAttr.array as Float32Array;
+      const scalesArr = scalesAttr ? (scalesAttr.array as Float32Array) : null;
+      const count = tier.stars.length;
 
       for (let i = 0; i < count; i++) {
-        const p = tier.periods[i];
-        const a = tier.amplitudes[i];
-        const phi = tier.phases[i];
-        const mod =
-          1.0 +
-          a * Math.sin((currentDay / p) * Math.PI * 2 + phi) +
-          0.25 * a * Math.sin((currentDay / (p * 0.5)) * Math.PI * 2 + phi * 1.5);
+        const star = tier.stars[i];
 
-        arr[i * 3] = Math.min(1.0, tier.baseColors[i * 3] * mod);
-        arr[i * 3 + 1] = Math.min(1.0, tier.baseColors[i * 3 + 1] * mod);
-        arr[i * 3 + 2] = Math.min(1.0, tier.baseColors[i * 3 + 2] * mod);
+        // Continuous Keplerian parallax orbit + proper motion linear drift from dataset
+        // Boost matches the trail when motion trail is active so stars stay pinned to their trails
+        const boost = showMotionTrail ? (targetFovRef.current < 0.005 ? 1.0 : Math.min(2500.0, Math.max(1.0, 0.12 / targetFovRef.current))) : 1.0;
+        if (star.pmra_mas_yr || star.pmdec_mas_yr || star.distance_ly) {
+          const pt = computePredictedAstrometricCoords(star, currentDay, boost, 1000.0);
+          if (isFinite(pt.x) && isFinite(pt.y) && isFinite(pt.z)) {
+            posArr[i * 3] = pt.x;
+            posArr[i * 3 + 1] = pt.y;
+            posArr[i * 3 + 2] = pt.z;
+          }
+        } else {
+          posArr[i * 3] = tier.basePositions[i * 3];
+          posArr[i * 3 + 1] = tier.basePositions[i * 3 + 1];
+          posArr[i * 3 + 2] = tier.basePositions[i * 3 + 2];
+        }
+
+        // Base star brightness from visual magnitude
+        const mag = star.magnitude ?? 9.0;
+        const baseB = Math.max(0.28, Math.min(1.0, 0.40 + 0.60 * ((13.0 - mag) / 7.0)));
+
+        // Spectral Flux in current band directly from SPHEREx data
+        const pPhot = star.satellite_photometry;
+        const f1 = Math.max(0.01, pPhot?.band1_blue_flux_mjy_sr || star.flux_mjy_sr || 1.0);
+        const f2 = Math.max(0.01, pPhot?.band2_cyan_flux_mjy_sr || f1 * 0.85);
+        const f3 = Math.max(0.01, pPhot?.band3_orange_flux_mjy_sr || f1 * 0.65);
+        const f4 = Math.max(0.01, pPhot?.band4_red_flux_mjy_sr || f1 * 0.45);
+        const fRef = Math.max(0.01, (f1 + f2 + f3 + f4) / 4.0);
+
+        const fluxAtWl = currentBand
+          ? estimateStarFluxAtWavelength(star, currentBand.wavelengthUm)
+          : fRef;
+
+        // Controlled ratio of flux at this wavelength compared to average flux
+        const rawRatio = fluxAtWl / fRef;
+        const ratio = Math.max(0.3, Math.min(2.5, isFinite(rawRatio) ? rawRatio : 1.0));
+
+        // Smooth contrast enhancement (gamma = 1.25, keeping points natural and round)
+        const ratioExag = Math.pow(ratio, 1.25);
+
+        // Natural individual stellar variability (decorrelated from spatial RA/Dec coordinates to eliminate stripes)
+        const { isVariable, periodDays, amplitude, phase } = getStarVariability(star);
+        const timeMod = isVariable
+          ? 1.0 + amplitude * Math.sin((elapsedDays / periodDays) * Math.PI * 2 + phase)
+          : 1.0;
+
+        if (isMonochromatic && currentBand) {
+          // MONOCHROMATIC SINGLE-BAND MODE:
+          const finalB = Math.max(0.05, Math.min(1.0, baseB * ratioExag * timeMod));
+          const finalScale = Math.max(0.6, Math.min(1.5, Math.pow(ratioExag, 0.25) * Math.pow(timeMod, 0.3)));
+
+          arr[i * 3] = monoColor[0] * finalB;
+          arr[i * 3 + 1] = monoColor[1] * finalB;
+          arr[i * 3 + 2] = monoColor[2] * finalB;
+
+          if (scalesArr) scalesArr[i] = isFinite(finalScale) ? finalScale : 1.0;
+        } else {
+          // FULL SPECTRUM MULTI-BAND RGB MODE:
+          const finalScale = Math.max(0.7, Math.min(1.4, Math.pow(timeMod, 0.25)));
+
+          arr[i * 3] = Math.min(1.0, tier.baseColors[i * 3] * timeMod);
+          arr[i * 3 + 1] = Math.min(1.0, tier.baseColors[i * 3 + 1] * timeMod);
+          arr[i * 3 + 2] = Math.min(1.0, tier.baseColors[i * 3 + 2] * timeMod);
+
+          if (scalesArr) scalesArr[i] = isFinite(finalScale) ? finalScale : 1.0;
+        }
       }
       colorsAttr.needsUpdate = true;
+      positionsAttr.needsUpdate = true;
+      if (scalesAttr) scalesAttr.needsUpdate = true;
     }
-  }, [currentDay]);
+  }, [currentDay, isMonochromatic, selectedBandIndex, showMotionTrail]);
 
   // Main Three.js Scene Setup (Geocentric Pure Deep Space POV)
   useEffect(() => {
@@ -305,19 +461,106 @@ export default function StellariumView({
       depthWrite: false,
     });
     const sz = 16;
+    const len = 6;
     const pts = [
-      new THREE.Vector3(-sz, -sz, 0), new THREE.Vector3(-sz + 5, -sz, 0),
-      new THREE.Vector3(-sz, -sz, 0), new THREE.Vector3(-sz, -sz + 5, 0),
-      new THREE.Vector3(sz, -sz, 0), new THREE.Vector3(sz - 5, -sz, 0),
-      new THREE.Vector3(sz, -sz, 0), new THREE.Vector3(sz, sz - 5, 0),
-      new THREE.Vector3(-sz, sz, 0), new THREE.Vector3(-sz + 5, sz, 0),
-      new THREE.Vector3(-sz, sz, 0), new THREE.Vector3(-sz, sz - 5, 0),
-      new THREE.Vector3(sz, sz, 0), new THREE.Vector3(sz - 5, sz, 0),
-      new THREE.Vector3(sz, sz, 0), new THREE.Vector3(sz, sz - 5, 0),
+      // Bottom-Left
+      new THREE.Vector3(-sz, -sz, 0), new THREE.Vector3(-sz + len, -sz, 0),
+      new THREE.Vector3(-sz, -sz, 0), new THREE.Vector3(-sz, -sz + len, 0),
+      // Bottom-Right
+      new THREE.Vector3(sz, -sz, 0), new THREE.Vector3(sz - len, -sz, 0),
+      new THREE.Vector3(sz, -sz, 0), new THREE.Vector3(sz, -sz + len, 0),
+      // Top-Left
+      new THREE.Vector3(-sz, sz, 0), new THREE.Vector3(-sz + len, sz, 0),
+      new THREE.Vector3(-sz, sz, 0), new THREE.Vector3(-sz, sz - len, 0),
+      // Top-Right
+      new THREE.Vector3(sz, sz, 0), new THREE.Vector3(sz - len, sz, 0),
+      new THREE.Vector3(sz, sz, 0), new THREE.Vector3(sz, sz - len, 0),
     ];
     reticleGroup.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), reticleMat));
     reticleGroup.visible = false;
     reticleGroup.renderOrder = 10;
+
+    // Static J2000 Epoch Reference Marker (Golden Crosshair)
+    const j2000Group = new THREE.Group();
+    j2000Ref.current = j2000Group;
+    scene.add(j2000Group);
+
+    const j2000Mat = new THREE.LineBasicMaterial({
+      color: 0xf59e0b, // Amber Gold
+      transparent: true,
+      opacity: 0.75,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const csz = 14;
+    const jpts = [
+      new THREE.Vector3(-csz, 0, 0), new THREE.Vector3(csz, 0, 0),
+      new THREE.Vector3(0, -csz, 0), new THREE.Vector3(0, csz, 0),
+    ];
+    j2000Group.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(jpts), j2000Mat));
+    j2000Group.visible = false;
+    j2000Group.renderOrder = 9;
+
+    // Glowing Motion Trajectory Trail Group
+    const trailGroup = new THREE.Group();
+    trailGroup.renderOrder = 8;
+    trailGroupRef.current = trailGroup;
+    scene.add(trailGroup);
+
+    const maxTrailPts = 60;
+    const trailGeo = new THREE.BufferGeometry();
+    const trailPositions = new Float32Array(maxTrailPts * 3);
+    const trailColors = new Float32Array(maxTrailPts * 3);
+    trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+    trailGeo.setAttribute('color', new THREE.BufferAttribute(trailColors, 3));
+    trailGeoRef.current = trailGeo;
+
+    const trailLineMat = new THREE.LineBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const trailLine = new THREE.Line(trailGeo, trailLineMat);
+    trailGroup.add(trailLine);
+
+    // Glowing waypoint dots along the trajectory tail
+    const trailDotsMat = new THREE.PointsMaterial({
+      size: 5,
+      vertexColors: true,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false,
+      sizeAttenuation: false,
+    });
+    const trailDots = new THREE.Points(trailGeo, trailDotsMat);
+    trailGroup.add(trailDots);
+
+    // Field-wide proper motion trails for all prominent moving stars
+    const maxFieldStars = 80;
+    const maxFieldPts = maxFieldStars * 2;
+    const fieldTrailGeo = new THREE.BufferGeometry();
+    const fieldPositions = new Float32Array(maxFieldPts * 3);
+    const fieldColors = new Float32Array(maxFieldPts * 3);
+    fieldTrailGeo.setAttribute('position', new THREE.BufferAttribute(fieldPositions, 3));
+    fieldTrailGeo.setAttribute('color', new THREE.BufferAttribute(fieldColors, 3));
+    fieldTrailGeoRef.current = fieldTrailGeo;
+
+    const fieldTrailMat = new THREE.LineBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const fieldTrailLines = new THREE.LineSegments(fieldTrailGeo, fieldTrailMat);
+    trailGroup.add(fieldTrailLines);
+
+    trailGroup.visible = false;
 
     // Celestial Grid Group (Equator & Coordinates in Space)
     const gridGroup = new THREE.Group();
@@ -350,15 +593,13 @@ export default function StellariumView({
     starsGroup.renderOrder = 2;
     starsGroupRef.current = starsGroup;
     scene.add(starsGroup);
-    starsGroup.renderOrder = 2;
-    starsGroupRef.current = starsGroup;
-    scene.add(starsGroup);
 
     // Initial build of stars if already loaded
     rebuildStars();
 
     // High Performance Animation Loop
     let animId: number;
+    let lastHudUpdate = 0;
     const animate = () => {
       animId = requestAnimationFrame(animate);
 
@@ -368,9 +609,106 @@ export default function StellariumView({
       cameraRot.current.altitude = Math.max(-1.5, Math.min(1.5, cameraRot.current.altitude));
 
       fovRef.current += (targetFovRef.current - fovRef.current) * 0.12;
-      if (camera.fov !== fovRef.current) {
+      if (Math.abs(camera.fov - fovRef.current) > 1e-8) {
         camera.fov = fovRef.current;
         camera.updateProjectionMatrix();
+      }
+
+      // Keep target reticles scaled smoothly with camera FOV so they never blow up or disappear
+      const sFactor = Math.max(0.0000004, fovRef.current / 50.0);
+      if (reticleRef.current) reticleRef.current.scale.setScalar(sFactor);
+      if (j2000Ref.current) j2000Ref.current.scale.setScalar(sFactor);
+
+      // Throttle HUD FOV state updates to 5 FPS to preserve 60 FPS WebGL
+      const now = performance.now();
+      if (now - lastHudUpdate > 200) {
+        setHudFov(fovRef.current);
+        lastHudUpdate = now;
+      }
+
+      // Update Motion Trajectory Trails if enabled
+      if (propsRef.current.showMotionTrail && trailGroupRef.current) {
+        trailGroupRef.current.visible = true;
+        const fov = fovRef.current;
+        // Boost factor matches the stars when trails are enabled: 1.0x at deep zoom, adaptive boost at wide zoom
+        const boost = fov < 0.005 ? 1.0 : Math.min(2500.0, Math.max(1.0, 0.12 / fov));
+        const cDay = propsRef.current.currentDay;
+        const trailDurationDays = Math.min(120, Math.max(25, cDay * 0.4 + 25));
+
+        // 1. High-detail Hero Trail for Selected Star
+        const starToTrace = propsRef.current.selectedStar || (stars.length > 0 ? stars[0] : null);
+        if (starToTrace && trailGeoRef.current) {
+          const numPts = 60;
+          const posAttr = trailGeoRef.current.attributes.position as THREE.BufferAttribute;
+          const colAttr = trailGeoRef.current.attributes.color as THREE.BufferAttribute;
+          const pArr = posAttr.array as Float32Array;
+          const cArr = colAttr.array as Float32Array;
+
+          // If at start (Day 1), render the initial 60-day trajectory preview loop so trail is immediately visible
+          const isAtStart = cDay <= 1.05;
+
+          for (let k = 0; k < numPts; k++) {
+            const frac = k / (numPts - 1);
+            const sampleDay = isAtStart
+              ? (1.0 + frac * 60.0)
+              : Math.max(1.0, cDay - trailDurationDays * (1.0 - frac));
+            const pt = computePredictedAstrometricCoords(starToTrace, sampleDay, boost, 1000.0);
+
+            pArr[k * 3] = pt.x;
+            pArr[k * 3 + 1] = pt.y;
+            pArr[k * 3 + 2] = pt.z;
+
+            // Gradient: transparent at tail (k=0) -> bright cyan/gold at head (k=numPts-1)
+            const alpha = Math.pow(frac, 1.4);
+            cArr[k * 3] = (0.25 + 0.75 * (1.0 - frac)) * alpha;
+            cArr[k * 3 + 1] = (0.25 + 0.75 * frac) * alpha;
+            cArr[k * 3 + 2] = alpha;
+          }
+
+          posAttr.needsUpdate = true;
+          colAttr.needsUpdate = true;
+        }
+
+        // 2. Field-wide proper motion trails for all prominent moving stars
+        if (fieldTrailGeoRef.current && propsRef.current.highPmStars) {
+          const fPosAttr = fieldTrailGeoRef.current.attributes.position as THREE.BufferAttribute;
+          const fColAttr = fieldTrailGeoRef.current.attributes.color as THREE.BufferAttribute;
+          const fPArr = fPosAttr.array as Float32Array;
+          const fCArr = fColAttr.array as Float32Array;
+          const starsList = propsRef.current.highPmStars.slice(0, 80);
+
+          for (let sIdx = 0; sIdx < starsList.length; sIdx++) {
+            const s = starsList[sIdx];
+            const isAtStart = cDay <= 1.05;
+            const startDay = isAtStart ? 1.0 : Math.max(1.0, cDay - 50);
+            const endDay = isAtStart ? 51.0 : cDay;
+
+            const ptStart = computePredictedAstrometricCoords(s, startDay, boost, 1000.0);
+            const ptEnd = computePredictedAstrometricCoords(s, endDay, boost, 1000.0);
+
+            const vIdx = sIdx * 2;
+            // Vertex 0: Tail (faded purple)
+            fPArr[vIdx * 3] = ptStart.x;
+            fPArr[vIdx * 3 + 1] = ptStart.y;
+            fPArr[vIdx * 3 + 2] = ptStart.z;
+            fCArr[vIdx * 3] = 0.50;
+            fCArr[vIdx * 3 + 1] = 0.20;
+            fCArr[vIdx * 3 + 2] = 0.85;
+
+            // Vertex 1: Head (bright electric cyan)
+            fPArr[(vIdx + 1) * 3] = ptEnd.x;
+            fPArr[(vIdx + 1) * 3 + 1] = ptEnd.y;
+            fPArr[(vIdx + 1) * 3 + 2] = ptEnd.z;
+            fCArr[(vIdx + 1) * 3] = 0.22;
+            fCArr[(vIdx + 1) * 3 + 1] = 0.90;
+            fCArr[(vIdx + 1) * 3 + 2] = 1.0;
+          }
+
+          fPosAttr.needsUpdate = true;
+          fColAttr.needsUpdate = true;
+        }
+      } else if (trailGroupRef.current) {
+        trailGroupRef.current.visible = false;
       }
 
       const az = cameraRot.current.azimuth;
@@ -463,21 +801,31 @@ export default function StellariumView({
     }
   }, [showGrid]);
 
-  // Update Reticle position on selected star
+  // Update Reticle & J2000 Reference positions on selected star
   useEffect(() => {
     if (!reticleRef.current) return;
     if (selectedStar) {
-      reticleRef.current.position.set(
-        selectedStar.position.x * 0.98,
-        selectedStar.position.y * 0.98,
-        selectedStar.position.z * 0.98
-      );
+      const livePt = computePredictedAstrometricCoords(selectedStar, currentDay, 1.0, 980.0);
+      reticleRef.current.position.set(livePt.x, livePt.y, livePt.z);
       reticleRef.current.lookAt(0, 0, 0);
       reticleRef.current.visible = true;
+
+      if (j2000Ref.current) {
+        // Base J2000 reference crosshair stays pinned at initial epoch
+        const baseX = selectedStar.position.x * 0.98;
+        const baseY = selectedStar.position.y * 0.98;
+        const baseZ = selectedStar.position.z * 0.98;
+        j2000Ref.current.position.set(baseX, baseY, baseZ);
+        j2000Ref.current.lookAt(0, 0, 0);
+        j2000Ref.current.visible = true;
+      }
     } else {
       reticleRef.current.visible = false;
+      if (j2000Ref.current) {
+        j2000Ref.current.visible = false;
+      }
     }
-  }, [selectedStar]);
+  }, [selectedStar, currentDay]);
 
   // Rotate Camera to Star smoothly (without changing zoom level!)
   const rotateToStar = useCallback((s: Star) => {
@@ -497,6 +845,16 @@ export default function StellariumView({
     // Keep user's zoom level intact - do NOT zoom out!
     onSelectStar(s);
   }, [onSelectStar]);
+
+  // Handle external zoom requests (e.g. Astrometric deep zoom button)
+  useEffect(() => {
+    if (zoomTargetFov !== null && zoomTargetFov !== undefined) {
+      targetFovRef.current = zoomTargetFov;
+      if (selectedStar) {
+        rotateToStar(selectedStar);
+      }
+    }
+  }, [zoomTargetFov, selectedStar, rotateToStar]);
 
   // Target star name from search
   useEffect(() => {
@@ -523,8 +881,8 @@ export default function StellariumView({
     const dy = e.clientY - prevMouse.current.y;
     prevMouse.current = { x: e.clientX, y: e.clientY };
 
-    // Natural drag: dragging right moves view right, dragging up moves view up
-    const sens = (fovRef.current / 45) * 0.0022;
+    // Natural drag proportional to FOV: smooth at wide angle and micro-precise at astrometric zoom
+    const sens = Math.max(1e-8, (fovRef.current / 45) * 0.0022);
     targetCameraRot.current.azimuth += dx * sens;
     targetCameraRot.current.altitude += dy * sens;
     targetCameraRot.current.altitude = Math.max(-1.5, Math.min(1.5, targetCameraRot.current.altitude));
@@ -565,8 +923,10 @@ export default function StellariumView({
   };
 
   const handleWheel = (e: React.WheelEvent) => {
-    const step = Math.max(0.12, (targetFovRef.current / 25) * 0.35);
-    targetFovRef.current = Math.max(0.4, Math.min(45, targetFovRef.current + Math.sign(e.deltaY) * step));
+    const minFov = 0.00002; // Micro-astrometric deep zoom (down to ~0.07 arcsec / 70 mas!)
+    const maxFov = 65.0;
+    const factor = e.deltaY < 0 ? 0.78 : 1.28;
+    targetFovRef.current = Math.max(minFov, Math.min(maxFov, targetFovRef.current * factor));
   };
 
   return (
@@ -579,6 +939,54 @@ export default function StellariumView({
     >
       <div ref={containerRef} className="absolute inset-0" />
       <canvas ref={labelsCanvasRef} className="absolute inset-0 pointer-events-none" />
+
+      {/* Astrometric Zoom HUD Overlay */}
+      {hudFov < 1.5 && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20 pointer-events-auto flex items-center gap-2 px-3.5 py-1.5 rounded-full backdrop-blur-xl bg-black/85 border border-sky-400/40 shadow-2xl text-xs font-mono">
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-sky-400 animate-pulse" />
+            <span className="text-white/70">Câmp (FOV):</span>
+            <span className="text-sky-300 font-bold">
+              {hudFov < 0.01 ? `${(hudFov * 3600).toFixed(2)}"` : `${hudFov.toFixed(3)}°`}
+            </span>
+            <span className="text-white/40">|</span>
+            <span className="text-white/70">Mărire:</span>
+            <span className="text-amber-300 font-bold">
+              {Math.round(50.0 / hudFov).toLocaleString()}×
+            </span>
+          </div>
+
+          {propsRef.current.showMotionTrail && (
+            <div className="flex items-center gap-1.5 pl-2 border-l border-white/20 text-purple-300 font-bold text-[11px]">
+              <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />
+              <span>Coadă Traiectorie Activă</span>
+            </div>
+          )}
+
+          {hudFov < 0.005 && (
+            <div className="flex items-center gap-2 pl-2 border-l border-white/20 text-[11px]">
+              <span className="text-amber-400 font-semibold flex items-center gap-1">
+                <span className="inline-block w-2 h-2 rounded-full bg-amber-400" />
+                [+] J2000 Bază
+              </span>
+              <span className="text-sky-400 font-semibold flex items-center gap-1">
+                <span className="inline-block w-2 h-2 border border-sky-400" />
+                [⛶] Poziție Live
+              </span>
+            </div>
+          )}
+
+          <button
+            onClick={() => {
+              targetFovRef.current = 3.2;
+              if (onResetZoom) onResetZoom();
+            }}
+            className="ml-1 px-2.5 py-0.5 rounded-full bg-white/10 hover:bg-white/20 text-white/80 hover:text-white text-[11px] transition-colors cursor-pointer"
+          >
+            Reset Zoom
+          </button>
+        </div>
+      )}
     </div>
   );
 }

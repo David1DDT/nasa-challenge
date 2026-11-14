@@ -1,11 +1,12 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import StellariumView, { Star } from '@/components/StellariumView';
 import StellariumHeader from '@/components/StellariumHeader';
 import StellariumFooter from '@/components/StellariumFooter';
 import StarInfoCard from '@/components/StarInfoCard';
-import TimeEvolutionSlider from '@/components/TimeEvolutionSlider';
+import UnifiedControlDeck from '@/components/UnifiedControlDeck';
+import LightCurvePanel from '@/components/LightCurvePanel';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
 
@@ -24,7 +25,38 @@ export default function Home() {
   const [catalog, setCatalog] = useState<'notebook' | 'satellite'>('notebook');
   const [coordMode, setCoordMode] = useState<'sphere' | 'space_3d'>('sphere');
   const [maxMagnitude, setMaxMagnitude] = useState(16.0);
-  const [currentDay, setCurrentDay] = useState<number>(0); // 0 to 410 days (Apr 2025 - Jun 2026)
+  const [currentDay, setCurrentDay] = useState<number>(1); // 1 to 410 days (Apr 2025 - Jun 2026)
+  const [selectedBandIndex, setSelectedBandIndex] = useState<number>(1); // 1 to 102 SPHEREx bands
+  const [isMonochromatic, setIsMonochromatic] = useState<boolean>(false); // false = Full Spectrum RGB, true = Single Band Monochromatic
+  const [isLightCurveOpen, setIsLightCurveOpen] = useState<boolean>(true); // Right side 4-band light curve panel, open by default
+  const [zoomTargetFov, setZoomTargetFov] = useState<number | null>(null);
+  const [showMotionTrail, setShowMotionTrail] = useState<boolean>(false);
+  const [isTimedTrailActive, setIsTimedTrailActive] = useState<boolean>(false);
+  const trailTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Zoom to Micro-Astrometric scale where proper motion & parallax are visibly distinct
+  const handleZoomAstrometric = useCallback(() => {
+    setZoomTargetFov(0.00008);
+  }, []);
+
+  // Trigger temporary 10s trajectory trail animation burst
+  const handleTriggerTimedTrail = useCallback(() => {
+    setShowMotionTrail(true);
+    setIsTimedTrailActive(true);
+    if (trailTimerRef.current) clearTimeout(trailTimerRef.current);
+
+    // After 10 seconds, revert unless persistent mode was toggled
+    trailTimerRef.current = setTimeout(() => {
+      setIsTimedTrailActive(false);
+      setShowMotionTrail(false);
+    }, 10000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (trailTimerRef.current) clearTimeout(trailTimerRef.current);
+    };
+  }, []);
 
   // Fetch data from Flask backend with fallback to static local public data
   const fetchData = useCallback(async () => {
@@ -82,27 +114,63 @@ export default function Home() {
         showGrid={showGrid}
         showStarLabels={showStarLabels}
         selectedStar={selectedStar}
-        onSelectStar={(s) => setSelectedStar(s)}
+        onSelectStar={(s) => {
+          setSelectedStar(s);
+          if (s) {
+            setTargetStarName(s.proper_name || s.name);
+            setIsLightCurveOpen(true);
+          }
+        }}
         targetStarName={targetStarName}
         currentDay={currentDay}
+        isMonochromatic={isMonochromatic}
+        selectedBandIndex={selectedBandIndex}
+        zoomTargetFov={zoomTargetFov}
+        onResetZoom={() => setZoomTargetFov(3.2)}
+        showMotionTrail={showMotionTrail}
       />
 
-      {/* Top Header: Search & Corner Fullscreen Button */}
+      {/* Top Header: Search, Telemetry Toggle & Fullscreen Button */}
       <StellariumHeader
         stars={stars}
         onSelectStar={(star) => {
           setSelectedStar(star);
           setTargetStarName(star.proper_name || star.name);
+          setIsLightCurveOpen(true);
         }}
         isFullscreen={isFullscreen}
         onToggleFullscreen={handleToggleFullscreen}
+        isLightCurveOpen={isLightCurveOpen}
+        onToggleLightCurve={() => setIsLightCurveOpen(!isLightCurveOpen)}
       />
 
-      {/* Horizontal Time Evolution Slider in Corner */}
-      <TimeEvolutionSlider
+      {/* Unified Bottom-Left Control Deck: 102 Spectral Bands & Time Evolution */}
+      <UnifiedControlDeck
         currentDay={currentDay}
         onChangeDay={setCurrentDay}
+        selectedBandIndex={selectedBandIndex}
+        onChangeBandIndex={setSelectedBandIndex}
+        isMonochromatic={isMonochromatic}
+        onToggleMonochromatic={setIsMonochromatic}
+        selectedStar={selectedStar}
         className="absolute bottom-4 left-4 z-30"
+        onSelectZoomPreset={(fov) => setZoomTargetFov(fov)}
+        showMotionTrail={showMotionTrail}
+        onToggleMotionTrail={setShowMotionTrail}
+        onTriggerTimedTrail={handleTriggerTimedTrail}
+        isTimedTrailActive={isTimedTrailActive}
+      />
+
+      {/* Right Side Slide-out Panel: 4-Band Light Curve Chart */}
+      <LightCurvePanel
+        isOpen={isLightCurveOpen}
+        onToggle={() => setIsLightCurveOpen(!isLightCurveOpen)}
+        star={selectedStar}
+        currentDay={currentDay}
+        onSeekDay={setCurrentDay}
+        onZoomAstrometric={handleZoomAstrometric}
+        selectedBandIndex={selectedBandIndex}
+        onSelectBandIndex={setSelectedBandIndex}
       />
 
       {/* Bottom Footer: Clock */}
@@ -114,8 +182,14 @@ export default function Home() {
       <StarInfoCard
         star={selectedStar}
         onClose={() => setSelectedStar(null)}
+        onOpenGraphs={() => setIsLightCurveOpen(true)}
+        onZoomAstrometric={handleZoomAstrometric}
         isNightMode={false}
         currentDay={currentDay}
+        isMonochromatic={isMonochromatic}
+        selectedBandIndex={selectedBandIndex}
+        showMotionTrail={showMotionTrail}
+        onToggleMotionTrail={setShowMotionTrail}
       />
 
       {/* Loading Overlay */}
